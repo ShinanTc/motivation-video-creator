@@ -15,19 +15,19 @@ INPUT_AUDIO = "input_audio.mp3"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-# ---------------- TEXT RENDER FUNCTION (NO IMAGEMAGICK) ----------------
-def create_text_clip(text, font_path, fontsize, color, stroke_color, stroke_width):
+# ---------------- TEXT RENDER FUNCTION ----------------
+def create_text_clip(text, font_path, fontsize, color):
     font = ImageFont.truetype(font_path, fontsize)
 
     # Calculate text size
     dummy_img = Image.new("RGBA", (1, 1))
     draw = ImageDraw.Draw(dummy_img)
-    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke_width)
+    bbox = draw.textbbox((0, 0), text, font=font)
 
     text_width = bbox[2] - bbox[0]
     text_height = bbox[3] - bbox[1]
 
-    # Create image
+    # Create transparent image
     img = Image.new("RGBA", (text_width + 20, text_height + 20), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
@@ -35,9 +35,7 @@ def create_text_clip(text, font_path, fontsize, color, stroke_color, stroke_widt
         (10, 10),
         text,
         font=font,
-        fill=color,
-        stroke_width=stroke_width,
-        stroke_fill=stroke_color
+        fill=color
     )
 
     return ImageClip(np.array(img))
@@ -102,16 +100,15 @@ for w in words:
     txt_clip = create_text_clip(
         w["text"],
         FONT_PATH,
-        fontsize=80,
-        color="white",
-        stroke_color="black",
-        stroke_width=2
+        fontsize=55,  # 🔽 Reduced font size
+        color="#113426"  # 🎯 Dark green color
     )
 
     txt_clip = txt_clip.set_start(w["start"]).set_end(w["end"])
 
-    # Bottom 40% placement
-    y_position = int(H * 0.75)
+    # 🎯 Correct placement:
+    # Top 60% / Bottom 40% split → place near top of bottom 40%
+    y_position = int(H * 0.62)
 
     txt_clip = txt_clip.set_position(("center", y_position))
 
