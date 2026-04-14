@@ -9,9 +9,9 @@ from PIL import Image, ImageDraw, ImageFont
 # ================================================================
 ASSETS_DIR       = "assets"
 OUTPUT_DIR       = "output"
+AUDIOS_DIR       = "audios"
 FONT_PATH        = os.path.abspath("fonts/comic.ttf")
 BASE_VIDEO       = os.path.join(ASSETS_DIR, "base_video.mp4")
-INPUT_AUDIO      = "input_audio.mp3"
 
 FONTSIZE         = 55
 TEXT_COLOR       = "#113426"
@@ -32,8 +32,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ================================================================
 # STEP 1 - DRAW A SINGLE SUBTITLE FRAME (Pillow, no ImageMagick)
 # ================================================================
-def render_subtitle_clip(text: str, font_path: str, fontsize: int,
-                          text_color: str, video_width: int) -> ImageClip:
+def render_subtitle_clip(text, font_path, fontsize, text_color, video_width):
     font = ImageFont.truetype(font_path, fontsize)
 
     dummy = Image.new("RGBA", (1, 1))
@@ -64,11 +63,11 @@ def render_subtitle_clip(text: str, font_path: str, fontsize: int,
 # ================================================================
 # STEP 2 - GROUP WHISPER WORDS INTO READABLE CHUNKS
 # ================================================================
-def group_words(words: list, words_per_group: int, max_gap: float) -> list:
+def group_words(words, words_per_group, max_gap):
     groups  = []
     current = []
 
-    for i, w in enumerate(words):
+    for w in words:
         if current:
             gap = w["start"] - current[-1]["end"]
             if gap > max_gap or len(current) >= words_per_group:
@@ -94,31 +93,36 @@ def group_words(words: list, words_per_group: int, max_gap: float) -> list:
 # ================================================================
 # STEP 3 - CALCULATE SAFE Y POSITION
 # ================================================================
-def safe_y_position(video_height: int, clip_height: int) -> float:
-    zone_top    = int(video_height * 0.60)
-    zone_bottom = video_height - BOTTOM_MARGIN
-
+def safe_y_position(video_height, clip_height):
+    zone_top        = int(video_height * 0.60)
+    zone_bottom     = video_height - BOTTOM_MARGIN
     available_space = zone_bottom - zone_top - clip_height
+
     if available_space < 0:
         return float(zone_top)
 
-    y = zone_top + available_space * SUBTITLE_Y_RATIO
-    return float(y)
+    return float(zone_top + available_space * SUBTITLE_Y_RATIO)
 
 
 # ================================================================
-# MAIN
+# PROCESS A SINGLE AUDIO FILE
 # ================================================================
-def main():
-    print("Loading video and audio...")
-    video = VideoFileClip(BASE_VIDEO)
-    audio = AudioFileClip(INPUT_AUDIO)
+def process_audio(audio_path, whisper_model):
+    audio_name = os.path.splitext(os.path.basename(audio_path))[0]
+    out_path   = os.path.join(OUTPUT_DIR, audio_name + ".mp4")
 
+    print("--------------------------------------------------")
+    print("Processing: " + audio_path)
+    print("Output will be saved to: " + out_path)
+
+    # --- Load assets ---
+    video     = VideoFileClip(BASE_VIDEO)
+    audio     = AudioFileClip(audio_path)
     video_w, video_h = video.size
-    audio_dur        = audio.duration
-    video_dur        = video.duration
+    audio_dur = audio.duration
+    video_dur = video.duration
 
-    print("Syncing video with audio...")
+    # --- Sync ---
     if audio_dur > video_dur:
         video = video.loop(duration=audio_dur)
     else:
@@ -126,30 +130,32 @@ def main():
 
     video = video.set_audio(audio)
 
-    print("Transcribing audio (Whisper)...")
-    model  = whisper.load_model("base")
-    result = model.transcribe(INPUT_AUDIO, word_timestamps=True)
-
+    # --- Transcribe ---
+    print("Transcribing...")
+    result    = whisper_model.transcribe(audio_path, word_timestamps=True)
     raw_words = []
+
     for segment in result["segments"]:
         for word in segment.get("words", []):
-            text  = word["word"].strip()
-            start = word["start"]
-            end   = word["end"]
-            dur   = end - start
+            text = word["word"].strip()
+            dur  = word["end"] - word["start"]
 
             if not text or dur < MIN_WORD_DUR:
                 continue
 
-            raw_words.append({"text": text, "start": start, "end": end})
+            raw_words.append({
+                "text":  text,
+                "start": word["start"],
+                "end":   word["end"],
+            })
 
     print("Whisper returned " + str(len(raw_words)) + " usable words.")
 
-    print("Grouping words into subtitle chunks...")
+    # --- Group ---
     subtitle_groups = group_words(raw_words, WORDS_PER_GROUP, MAX_GAP_MERGE)
     print("Grouped into " + str(len(subtitle_groups)) + " subtitle chunks.")
 
-    print("Rendering subtitle clips...")
+    # --- Build subtitle clips ---
     overlay_clips = []
 
     for group in subtitle_groups:
@@ -172,10 +178,10 @@ def main():
 
         overlay_clips.append(clip)
 
-    print("Compositing and exporting final video...")
+    # --- Composite and export ---
+    print("Rendering final video...")
     final = CompositeVideoClip([video, *overlay_clips])
 
-    out_path = os.path.join(OUTPUT_DIR, "final_video.mp4")
     final.write_videofile(
         out_path,
         fps         = 30,
@@ -186,7 +192,49 @@ def main():
         logger      = "bar",
     )
 
-    print("Done! Saved to: " + out_path)
+    # --- Explicitly close to free memory before next iteration ---
+    final.close()
+    video.close()
+    audio.close()
+
+    print("Saved: " + out_path)
+
+
+# ================================================================
+# MAIN
+# ================================================================
+def main():
+    # --- Collect all mp3s from the audios folder ---
+    if not os.path.isdir(AUDIOS_DIR):
+        print("Audios folder not found: " + AUDIOS_DIR)
+        return
+
+    audio_files = sorted([
+        os.path.join(AUDIOS_DIR, f)
+        for f in os.listdir(AUDIOS_DIR)
+        if f.lower().endswith(".mp3")
+    ])
+
+    if not audio_files:
+        print("No .mp3 files found in: " + AUDIOS_DIR)
+        return
+
+    print("Found " + str(len(audio_files)) + " audio file(s). Loading Whisper model...")
+
+    # Load Whisper once and reuse across all files — avoids reloading the
+    # model weights on every iteration which is slow and wastes memory.
+    model = whisper.load_model("base")
+
+    for index, audio_path in enumerate(audio_files):
+        print("\n[" + str(index + 1) + "/" + str(len(audio_files)) + "]")
+        try:
+            process_audio(audio_path, model)
+        except Exception as e:
+            print("Failed to process " + audio_path + " — " + str(e))
+            print("Skipping to next file...")
+            continue
+
+    print("\nAll done! Videos saved in: " + OUTPUT_DIR)
 
 
 if __name__ == "__main__":
